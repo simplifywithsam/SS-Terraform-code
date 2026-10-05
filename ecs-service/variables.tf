@@ -12,6 +12,17 @@ variable "assume_role_arn" {
   type        = string
 }
 
+variable "environment_name" {
+  description = "Environment folder name used by Harness (DEV, UAT, BUAT, PROD)"
+  type        = string
+  default     = "DEV"
+
+  validation {
+    condition     = contains(["DEV", "UAT", "BUAT", "PROD"], var.environment_name)
+    error_message = "environment_name must be one of DEV, UAT, BUAT, PROD."
+  }
+}
+
 variable "tags" {
   description = "Common tags applied to all resources"
   type        = map(string)
@@ -22,7 +33,7 @@ variable "tags" {
 # Existing infrastructure (looked up, not created)
 # ---------------------------------------------------------------------------
 variable "cluster_name" {
-  description = "Name of the existing ECS cluster"
+  description = "Name of the existing ECS cluster (Harness target_cluster)"
   type        = string
 }
 
@@ -32,7 +43,7 @@ variable "vpc_id" {
 }
 
 variable "private_subnet_ids" {
-  description = "Private subnets for the Fargate tasks (need a route to Artifactory, e.g. via NAT or proxy)"
+  description = "Private subnets for the Fargate tasks (need a route to ECR, CloudWatch Logs and Secrets Manager)"
   type        = list(string)
 }
 
@@ -42,18 +53,18 @@ variable "alb_name" {
 }
 
 variable "alb_listener_port" {
-  description = "Port of the existing ALB listener to attach the service to (443 for HTTPS)"
+  description = "Port of the existing ALB listener to attach the service to"
   type        = number
   default     = 443
 }
 
 # ---------------------------------------------------------------------------
-# Service
+# Service (must match ecs_task-definition/<ENV>/vars.yaml)
 # ---------------------------------------------------------------------------
 variable "service_name" {
-  description = "ECS service / application name (max 28 chars so the target group name fits)"
+  description = "ECS service name = vars.yaml serviceName (max 28 chars so derived names fit)"
   type        = string
-  default     = "iec-dev-ecs-sample-app"
+  default     = "iec-sample-app"
 
   validation {
     condition     = length(var.service_name) <= 28
@@ -61,45 +72,22 @@ variable "service_name" {
   }
 }
 
-variable "container_image" {
-  description = "Full Artifactory image reference, e.g. mycompany.jfrog.io/iec-docker-local/iec-sample-app:1.0.0"
+variable "container_name" {
+  description = "Main container name = vars.yaml containerDefinitions[0].name"
   type        = string
+  default     = "iec-sample-app"
 }
 
 variable "container_port" {
-  description = "Port the container listens on"
+  description = "Main container port = vars.yaml containerPort"
   type        = number
   default     = 8080
 }
 
-variable "task_cpu" {
-  description = "Fargate task CPU units (256, 512, 1024, ...)"
-  type        = number
-  default     = 256
-}
-
-variable "task_memory" {
-  description = "Fargate task memory in MiB"
-  type        = number
-  default     = 512
-}
-
-variable "cpu_architecture" {
-  description = "X86_64 or ARM64 — must match the image platform"
-  type        = string
-  default     = "X86_64"
-}
-
 variable "desired_count" {
-  description = "Initial number of tasks"
+  description = "Initial number of tasks in the service definition"
   type        = number
   default     = 2
-}
-
-variable "environment_variables" {
-  description = "Plain environment variables passed to the container"
-  type        = map(string)
-  default     = {}
 }
 
 variable "enable_execute_command" {
@@ -108,35 +96,47 @@ variable "enable_execute_command" {
   default     = false
 }
 
-variable "log_retention_days" {
-  description = "CloudWatch log retention for container logs"
+# ---------------------------------------------------------------------------
+# ECR
+# ---------------------------------------------------------------------------
+variable "create_ecr_repository" {
+  description = "Create the ECR repo here. Set false if it already exists (e.g. created by the self-service)."
+  type        = bool
+  default     = true
+}
+
+variable "ecr_repository_name" {
+  description = "ECR repository for the service image (Harness ecr_repository_name)"
+  type        = string
+  default     = "iec-sample-app"
+}
+
+variable "ecr_images_to_keep" {
+  description = "How many images the lifecycle policy keeps"
   type        = number
   default     = 30
 }
 
 # ---------------------------------------------------------------------------
-# Artifactory pull credentials
+# Logs (OTEL sidecar pushes the app's log file here)
 # ---------------------------------------------------------------------------
-variable "artifactory_credentials_secret_arn" {
-  description = <<-EOT
-    ARN of a Secrets Manager secret holding {"username":"...","password":"..."} for
-    pulling from Artifactory. Set to null if the repo allows anonymous pulls.
-  EOT
+variable "otel_log_group_name" {
+  description = "CloudWatch log group = vars.yaml CLOUDWATCH_LOG_GROUP_NAME. Defaults to /ecs/<cluster>/<service>."
   type        = string
   default     = null
 }
 
-variable "artifactory_credentials_kms_key_arn" {
-  description = "Customer-managed KMS key that encrypts the Artifactory secret (null if it uses the AWS managed key)"
-  type        = string
-  default     = null
+variable "log_retention_days" {
+  description = "CloudWatch log retention"
+  type        = number
+  default     = 30
 }
 
 # ---------------------------------------------------------------------------
 # Load balancer routing / health check
 # ---------------------------------------------------------------------------
 variable "listener_rule_priority" {
-  description = "Priority of the listener rule on the existing ALB listener (must be unique on that listener)"
+  description = "Priority of the listener rule (must be unique on the listener)"
   type        = number
   default     = 100
 }
@@ -153,20 +153,20 @@ variable "listener_rule_host_headers" {
   default     = []
 }
 
-variable "manage_alb_egress_rule" {
-  description = "Add an egress rule on the ALB security group(s) towards the tasks"
-  type        = bool
-  default     = false
-}
-
 variable "health_check_path" {
   description = "Health check path for the target group"
   type        = string
   default     = "/health"
 }
 
+variable "manage_alb_egress_rule" {
+  description = "Add an egress rule on the ALB security group(s) towards the tasks (only if the ALB SG restricts egress)"
+  type        = bool
+  default     = false
+}
+
 # ---------------------------------------------------------------------------
-# Auto scaling
+# Auto scaling (rendered into Harness scaling_target / scaling_policy)
 # ---------------------------------------------------------------------------
 variable "autoscaling_min_capacity" {
   type    = number
@@ -179,7 +179,7 @@ variable "autoscaling_max_capacity" {
 }
 
 variable "autoscaling_cpu_target" {
-  description = "Target average CPU utilisation (%) for scaling"
+  description = "Target average CPU utilisation (%)"
   type        = number
   default     = 70
 }
